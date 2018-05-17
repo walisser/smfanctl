@@ -15,8 +15,8 @@ user="ghaxt"
 
 name=`basename $0`
 pid_file="/var/run/$name.pid"
-stdout_log="/var/log/smfanctl/$name.log"
-stderr_log="/var/log/smfanctl/$name.err"
+stdout_log="/var/log/opt/$name.log"
+stderr_log="/var/log/opt/$name.err"
 
 get_pid() {
     cat "$pid_file"
