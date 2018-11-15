@@ -17,6 +17,7 @@ name=`basename $0`
 pid_file="/var/run/$name.pid"
 stdout_log="/var/log/opt/$name.log"
 stderr_log="/var/log/opt/$name.err"
+log_port="2222"
 
 get_pid() {
     cat "$pid_file"
@@ -34,9 +35,11 @@ case "$1" in
         echo "Starting $name"
         cd "$dir"
         if [ -z "$user" ]; then
-            su --command "$cmd" > "$stdout_log" 2> "$stderr_log" &
+            #su --command "$cmd" > "$stdout_log" 2> "$stderr_log" &
+            su --command "$cmd" 2>&1 | socat - udp-datagram:localhost:$log_port &
         else
-            su "$user" --command "$cmd" > "$stdout_log" 2> "$stderr_log" &
+            #su "$user" --command "$cmd" > "$stdout_log" 2> "$stderr_log" &
+            su "$user" --command "$cmd" 2>&1 | socat - udp-datagram:localhost:$log_port  &
         fi
         echo $! > "$pid_file"
         if ! is_running; then
