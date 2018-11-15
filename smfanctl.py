@@ -20,7 +20,7 @@
 #
 # 2) The average temp is a better way to determine if the zone
 #    temp is rising or falling. Because the max temp only
-#    increments in whole numbers, it can not show small
+#    increments in whole numbers, it cannot show small
 #    changes in the system that could be corrected.
 #
 # 3) We should apply the smallest correction possible to
@@ -171,7 +171,6 @@ def controlZone(z,t):
         adj = 3
     elif absChange > minChange*2:
         adj = 2
-        
     elif absChange > minChange:
         adj = 1
     else:
@@ -186,7 +185,7 @@ def controlZone(z,t):
        tempChange=-1
        adj=1
 
-    if   tempChange > 0 and t.max >= z.target:
+    if tempChange > 0 and t.max >= z.target:
         z.lastTemp = t.avg
         newPwm += adj
     elif tempChange < 0 and t.max <= z.target:
