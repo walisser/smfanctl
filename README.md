@@ -12,11 +12,11 @@ rather than stay as close as possible to the setpoint. The reasoning is thermal 
 could be a larger issue than temperature.
 
 The fan speed is adjusted if one of the two cases are met:
-  1. The maximum drive temperature is more than 5 degrees from the setpoint
+  1. The maximum drive temperature is more than 10 degrees from the setpoint
   2. The population average temp changed since the last adjustment,
      and the amount of change is greater than if one drive changed by one degree.
 
-The max drive temp will hold +/- 5 degrees from the setpoint. As long as the average
+The max drive temp will hold +/- 10 degrees from the setpoint. As long as the average
 population temperature is stable there will be no correction to get closer to the setpoint.
 
 Since drive temperatures are whole numbers, it is common that a single drive temperature twiddles 
@@ -26,4 +26,3 @@ The adjustment applied is always small (usually 1% PWM) to minimize the chance
 of overshooting/undershooting the setpoint, at the cost of taking longer to 
 stabilize should the drives be far above or below the setpoint at startup.
 
-See python script for more details.
