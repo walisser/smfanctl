@@ -11,7 +11,7 @@
 
 touch /tmp/hddtemp.db
 dir="/tmp"
-cmd="/usr/sbin/hddtemp --foreground --daemon --numeric --file /tmp/hddtemp.db /dev/sd[b-f]"
+cmd="/usr/sbin/hddtemp --foreground --daemon --numeric --file /tmp/hddtemp.db /dev/sd[a-z]"
 user=""
 
 name=`basename $0`
