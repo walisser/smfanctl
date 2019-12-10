@@ -41,10 +41,9 @@
 import subprocess,time
 
 class Zone():
-    def __init__(self, zone, startPwm, slope, target):
+    def __init__(self, zone, startPwm, target):
         self.zone = zone
         self.pwm  = startPwm
-        self.slope = slope
         self.target = target
         self.lastTemp = 0
         self.ticks = 0
@@ -57,6 +56,7 @@ class Reading():
         self.max = float('-inf')
         self.avg = 0
         self.count = 0
+        self.temps = []
 
 #
 # Above 45c or below 20c is apparently the
@@ -72,22 +72,79 @@ class Reading():
 # motherboard pins FAN[1-4]
 # temps polled via areca utility and wrapper areca-hwinfo 
 # fans DO NOT seem to respond below 34%
-arecaZone = Zone(0, 34, 5, 39)
+arecaZone = Zone(0, 65, 35)
 
 # zone for drives connected to motherboard
 # motherboard pins FANA
 # temps polled via hddtemp utility running in daemon mode
-onboardZone = Zone(1, 34, 5, 39)
+onboardZone = Zone(1, 55, 35)
 
 def setPwm(zone, value):
     return subprocess.run(args=['./ipmi-fanctl', '-setpwm', '%d'%zone, '%d'%value])
 
+def readArecaDiskList():
+    print('reading areca disk list...')
+    driveIds=[]
+    result = subprocess.run(args=['./areca-hwinfo','-disk-info'], stdout=subprocess.PIPE)
+    lines = result.stdout.decode('utf-8').split('\n')
+    lines.reverse()
+    while (len(lines) > 0):
+        line = lines.pop()
+        if line.startswith('==='):
+          break
+
+    while (len(lines) > 0):
+        line = lines.pop()
+        if line.startswith('==='):
+          break
+
+        fields = line.split()
+        if len(fields) < 4:
+            print('unknown areca format')
+            break
+
+        driveName = fields[3]
+        if (driveName != 'N.A.'):
+            driveId = int(fields[0])
+            driveIds.append(driveId)
+
+    return driveIds
+
+def readArecaSmartTemps(driveIds):
+    r = Reading()
+    args=['./areca-hwinfo', '-disk-smart']
+    args += list(map(str,driveIds))
+    result = subprocess.run(args, stdout=subprocess.PIPE)
+    lines = result.stdout.decode('utf-8').split('\n')
+    lines.reverse()
+    while (len(lines) > 0):
+        line = lines.pop()
+        if line.startswith('194 Temperature'):
+            fields = line.split()
+            temp = int(fields[3])
+            r.max = max(temp, r.max)
+            r.min = min(temp, r.min)
+            r.avg += temp
+            r.count += 1
+            r.temps.append(temp)
+
+    if r.count > 0:
+        r.avg /= r.count
+    else:
+        r.avg = 35
+        r.min = 35
+        r.max = 35
+        r.count = 1
+        print('areca smart temps: nothing was read')
+
+    return r
+
+
 def readArecaTemps():
     r = Reading()
-
     result = subprocess.run(args=['./areca-hwinfo'], stdout=subprocess.PIPE)
     lines = result.stdout.decode('utf-8').split('\n')
-    
+    lines.reverse()
     while len(lines) > 0:
         line = lines.pop()
         if line.find('HDD') == 0: # only lines starting with HDD
@@ -101,15 +158,16 @@ def readArecaTemps():
             r.min = min(temp, r.min)
             r.avg += temp
             r.count += 1
+            r.temps.append(temp)
 
     if r.count > 0:
         r.avg /= r.count
     else:
-        r.avg = 60
-        r.min = 60
-        r.max = 60
+        r.avg = 35
+        r.min = 35
+        r.max = 35
         r.count = 1
-        print('areca temps: nothing was read')
+        print('areca hw info temps: nothing was read')
 
     return r
 
@@ -124,19 +182,25 @@ def readSmartTemps():
     index = 3
     
     while (index < len(fields)):
-        temp = int(fields[index])
-        r.max = max(temp, r.max)
-        r.min = min(temp, r.min)
-        r.avg += temp
-        r.count += 1
+        name = fields[index-1]
+        if (name.startswith('WDC')):
+            if (fields[index] == 'ERR'):
+                index += 5
+                continue
+            temp = int(fields[index])
+            r.max = max(temp, r.max)
+            r.min = min(temp, r.min)
+            r.avg += temp
+            r.count += 1
+            r.temps.append(temp)
         index += 5
 
     if (r.count > 0):
         r.avg /= r.count
     else:
-        r.avg = 60
-        r.min = 60
-        r.max = 60
+        r.avg = 35
+        r.min = 35
+        r.max = 35
         r.count = 1
         print('hddtemp: nothing was read')
     
@@ -153,10 +217,9 @@ def controlZone(z,t):
         z.lastTemp = t.avg
 
     #if tempChange != 0:
-    print('zone%d:%d change=%.2f pwm=%d last=%.2f avg=%.2f min=%d max=%d' % 
-            (z.zone, z.ticks, tempChange, z.pwm, z.lastTemp, t.avg, t.min, t.max))
+    print('zone%d ticks=%d num=%d change=%.2f pwm=%d last=%.2f avg=%.2f min=%d max=%d temps=%s' %
+            (z.zone, z.ticks, t.count, tempChange, z.pwm, z.lastTemp, t.avg, t.min, t.max, ','.join(list(map(str,t.temps)))))
 
-    
     newPwm = z.pwm
 
     absChange = abs(tempChange)
@@ -177,11 +240,12 @@ def controlZone(z,t):
         tempChange = 0
         adj = 0
 
-    # the change may be 0 but we are way over/under temp
-    if (t.max - z.target) > 5:
+    # the change may be 0 but we are way over/under temp,
+    # bump the pwm by one every tick
+    if (t.max - z.target) > 10:
        tempChange=1
        adj=1
-    elif (t.max - z.target) < -5:
+    elif (t.max - z.target) < -10:
        tempChange=-1
        adj=1
 
@@ -203,13 +267,17 @@ def controlZone(z,t):
         else:
             print('zone%d: change rpm failed!' % z.zone)
 
+arecaIds = readArecaDiskList()
+print('areca ids='+','.join(list(map(str,arecaIds))))
+
 # set initial pwm
 setPwm(arecaZone.zone, arecaZone.pwm)
 setPwm(onboardZone.zone, onboardZone.pwm)
 
 while True:
-    time.sleep(15)
-    controlZone(arecaZone, readArecaTemps())
+    #controlZone(arecaZone, readArecaTemps())
+    controlZone(arecaZone, readArecaSmartTemps(arecaIds))
     controlZone(onboardZone, readSmartTemps())
+    time.sleep(30)
 
 exit(0)
