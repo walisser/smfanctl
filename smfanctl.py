@@ -115,8 +115,7 @@ def readArecaSmartTemps(driveIds):
             # temp = int(fields[3])
             # temp could be min/max (packed) or raw value, assuming
             # it is always celsius, the lower byte works in either case
-            tMin = ( int(fields[6]) & 0xffff00 ) >> 16
-            tMax =   int(fields[6]) & 0xff
+            tMax = int(fields[6]) & 0xff
             temp = tMax
 
             r.max = max(temp, r.max)
@@ -219,15 +218,15 @@ def controlZone(z,t):
     # is moving in the right direction
     if z.lastAvg > 0:
         if t.avg > z.lastAvg:
-            z.rising = z.rising + 1
+            z.rising += 1 
             z.falling = 0
             z.stable = 0
         elif t.avg < z.lastAvg:
-            z.falling = z.falling + 1
+            z.falling += 1
             z.rising = 0
             z.stable = 0
         else:
-            z.stable = z.stable + 1
+            z.stable += 1
             if z.stable > 1:
                 z.rising = 0
                 z.falling = 0
@@ -281,18 +280,18 @@ def controlZone(z,t):
     else:
         # we are on the setpoint, do small adjustment if the average moves
         if z.rising > 0:
-            tempChange=1
-            adj=1
-            z.rising=0
+            tempChange = 1
+            adj = 1
+            z.rising = 0
             print('zone%d stabilizing, correct %d' % (z.zone, adj*tempChange))
         elif z.falling > 0:
-            tempChange=-1
-            adj=1
-            z.falling=0
+            tempChange = -1
+            adj = 1
+            z.falling = 0
             print('zone%d stabilizing, correct %d' % (z.zone, adj*tempChange))
         else:
-            tempChange=0
-            adj=0
+            tempChange = 0
+            adj = 0
             print('zone%d stable' % z.zone)
 
     # final check
@@ -360,7 +359,6 @@ arecaZone = Zone(0, 60)
 # motherboard header FANA for a single fan
 # temps polled via hddtemp utility running in daemon mode
 onboardZone = Zone(1, 55)
-print('areca ids='+','.join(list(map(str,arecaIds))))
 
 # set initial pwm
 setPwm(arecaZone.zone, arecaZone.pwm)
@@ -369,6 +367,7 @@ setPwm(onboardZone.zone, onboardZone.pwm)
 # areca polling requires the id of each disk to poll
 # hddtemp polling returns all connected drives
 arecaIds = readArecaDiskList()
+print('areca ids='+','.join(list(map(str,arecaIds))))
 
 while True:
     #controlZone(arecaZone, readArecaTemps())
