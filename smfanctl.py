@@ -1,22 +1,17 @@
 #!/usr/bin/python3 -u
 
 #
-# Hard drive temp control using PWM feature of supermicro
-# motherboard. There are two PWM zones controlled. The min/max/avg
-# drive temps for each zone are polled, and the PWM for that
-# zone is adjusted to maintain temperature around a
-# set maximum value.
+# Hard drive temp control using PWM feature of supermicro ipmi interface
 #
 # The control method is:
-# 1) The max temp determines if we need to regulate
-# 2) The average temp determines which way to regulate
-# 3) Amount of temperature change determines amount of correction
+# 1) The hottest drive is set to a fixed temperature (global "setPoint")
+# 2) The average of all drives is used to make corrections
 #
 # Reasoning:
 #
-# 1) The max temp is the critical factor. Some drives in a zone
-#    will run hotter than others, the hottest drive should determine
-#    if we need to make an adjustment or not.
+# 1) If overheating is the problem, the hottest drive in the array
+#    should be what to worry about. It is not likely that a drive
+#    would be too cold in an air-cooled (non-condensing) situation.
 #
 # 2) The average temp is a better way to determine if the zone
 #    temp is rising or falling. Because the max temp only
@@ -26,62 +21,53 @@
 # 3) We should apply the smallest correction possible to
 #    reduce the number and size of oscillations, rather than
 #    arrive at the set temperature quickly.
-#    The theory is that continuous thermal cycling could 
+#    The theory is that continuous thermal cycling could
 #    do more damage than relatively short excursions beyond
 #    the set point.
 #
 
 
-# preqs
+# requirements
 #     ipmitool (apt-get install ipmitool)
-#     areca command line tool (cli64)
+#     areca command line tool (cli64, via areca support page)
+#     hddtemp running as daemon (apt-get install hddtemp) for ICH/PCH drives
 # setup
 #     modprobe ipmi_devintf
-#     
+#
+
 import subprocess,time
 
+
+# defines independently cooled zone which has
+# its own temperature reading and fan control
 class Zone():
-    def __init__(self, zone, startPwm, target):
+    def __init__(self, zone, startPwm):
+        global setPoint
         self.zone = zone
         self.pwm  = startPwm
-        self.target = target
-        self.lastTemp = 0
+        self.target = setPoint
+        self.lastTemp = 0 # temp before last pwm change
+        self.lastAvg  = 0 # last polled temp
         self.ticks = 0
         self.maxPwm = 100
         self.minPwm = 34 # minimum value accepted by the SMC is 25, fans stop at 34
+        self.rising = 0  # number of "rising" readings since last pwm change
+        self.falling = 0 # number of "falling" readings since last pwm change
+        self.stable = 0  # number of consecutive stable readings
 
+# defines a single reading (poll) of drive temperatures in a Zone
 class Reading():
     def __init__(self):
         self.min = float('inf')
         self.max = float('-inf')
-        self.avg = 0
-        self.count = 0
-        self.temps = []
-
-#
-# Above 45c or below 20c is apparently the
-# Danger Zone for long-lived hard drives.
-# Some also say 30-40c is the sweet spot.
-#
-# Humidity is also a factor, so choosing
-# to run around 39c to reduce
-# relative humidity in the drive
-#
-
-# zone for drives connected to areca controller
-# motherboard pins FAN[1-4]
-# temps polled via areca utility and wrapper areca-hwinfo 
-# fans DO NOT seem to respond below 34%
-arecaZone = Zone(0, 65, 35)
-
-# zone for drives connected to motherboard
-# motherboard pins FANA
-# temps polled via hddtemp utility running in daemon mode
-onboardZone = Zone(1, 55, 35)
+        self.avg = 0    # average temperature
+        self.count = 0  # number of drives (reporting) in zone
+        self.temps = [] # all readings temps in celsius
 
 def setPwm(zone, value):
     return subprocess.run(args=['./ipmi-fanctl', '-setpwm', '%d'%zone, '%d'%value])
 
+# read list of drives attached to areca controller(s) "cli64 disk info"
 def readArecaDiskList():
     print('reading areca disk list...')
     driveIds=[]
@@ -110,7 +96,10 @@ def readArecaDiskList():
 
     return driveIds
 
+# read temps using "cli64 disk smart drv=#" where # is the
+# device number (first column in "cli64 disk info" list)
 def readArecaSmartTemps(driveIds):
+    global setPoint
     r = Reading()
     args=['./areca-hwinfo', '-disk-smart']
     args += list(map(str,driveIds))
@@ -121,7 +110,15 @@ def readArecaSmartTemps(driveIds):
         line = lines.pop()
         if line.startswith('194 Temperature'):
             fields = line.split()
-            temp = int(fields[3])
+            # this is arecas interpretation of raw value,
+            # it is wrong for recent wdc drives
+            # temp = int(fields[3])
+            # temp could be min/max (packed) or raw value, assuming
+            # it is always celsius, the lower byte works in either case
+            tMin = ( int(fields[6]) & 0xffff00 ) >> 16
+            tMax =   int(fields[6]) & 0xff
+            temp = tMax
+
             r.max = max(temp, r.max)
             r.min = min(temp, r.min)
             r.avg += temp
@@ -131,16 +128,17 @@ def readArecaSmartTemps(driveIds):
     if r.count > 0:
         r.avg /= r.count
     else:
-        r.avg = 35
-        r.min = 35
-        r.max = 35
+        r.avg = setPoint
+        r.min = setPoint
+        r.max = setPoint
         r.count = 1
-        print('areca smart temps: nothing was read')
+        print('readArecaSmartTemps: nothing read')
 
     return r
 
-
+# read temps using  "cli64 hw info", does not work on newer adapters
 def readArecaTemps():
+    global setPoint
     r = Reading()
     result = subprocess.run(args=['./areca-hwinfo'], stdout=subprocess.PIPE)
     lines = result.stdout.decode('utf-8').split('\n')
@@ -163,24 +161,22 @@ def readArecaTemps():
     if r.count > 0:
         r.avg /= r.count
     else:
-        r.avg = 35
-        r.min = 35
-        r.max = 35
+        r.avg = setPoint
+        r.min = setPoint
+        r.max = setPoint
         r.count = 1
-        print('areca hw info temps: nothing was read')
+        print('readArecaTemps: nothing read')
 
     return r
 
-def readSmartTemps():
-    
+
+# read temps from hddtemp daemon, for ICH/PCH drives
+def readHddTemps():
+    global setPoint
     r = Reading()
-
-    # read output from hddtemp daemon
     result = subprocess.run(args=['nc', 'localhost', '7634'], stdout=subprocess.PIPE)
-
     fields = result.stdout.decode('utf-8').split('|')
     index = 3
-    
     while (index < len(fields)):
         name = fields[index-1]
         if (name.startswith('WDC')):
@@ -198,38 +194,62 @@ def readSmartTemps():
     if (r.count > 0):
         r.avg /= r.count
     else:
-        r.avg = 35
-        r.min = 35
-        r.max = 35
+        r.avg = setPoint
+        r.min = setPoint
+        r.max = setPoint
         r.count = 1
-        print('hddtemp: nothing was read')
-    
+        print('readHddTemps: nothing read')
+
     return r
 
 def controlZone(z,t):
-   
+
     z.ticks += 1
-   
     tempChange = 0
+
+    # track temp before last pwm change to estimate
+    # amount of correction needed
     if z.lastTemp > 0:
         tempChange = t.avg - z.lastTemp
     else:
         z.lastTemp = t.avg
 
-    #if tempChange != 0:
-    print('zone%d ticks=%d num=%d change=%.2f pwm=%d last=%.2f avg=%.2f min=%d max=%d temps=%s' %
-            (z.zone, z.ticks, t.count, tempChange, z.pwm, z.lastTemp, t.avg, t.min, t.max, ','.join(list(map(str,t.temps)))))
+    # the temp is either rising, falling, or stable based
+    # on consecutive readings. skip corrections if the temp
+    # is moving in the right direction
+    if z.lastAvg > 0:
+        if t.avg > z.lastAvg:
+            z.rising = z.rising + 1
+            z.falling = 0
+            z.stable = 0
+        elif t.avg < z.lastAvg:
+            z.falling = z.falling + 1
+            z.rising = 0
+            z.stable = 0
+        else:
+            z.stable = z.stable + 1
+            if z.stable > 1:
+                z.rising = 0
+                z.falling = 0
+
+        z.lastAvg = t.avg
+    else:
+        z.lastAvg = t.avg
+
+    print('zone%d ticks=%d num=%d change=%.2f rising/falling/stable=%d/%d/%d pwm=%d last=%.2f avg=%.2f min=%d max=%d temps=%s' %
+            (z.zone, z.ticks, t.count, tempChange, z.rising, z.falling, z.stable,
+                z.pwm, z.lastTemp, t.avg, t.min, t.max, ','.join(list(map(str,t.temps)))))
 
     newPwm = z.pwm
 
+    # change since last pwm change
     absChange = abs(tempChange)
 
     # if one drive changes by one degree, the average
     # moves by this amount
     minChange = 1.0 / t.count
 
-    # the temp must change by more than minchange to do a correction
-    # scale up the correction slightly for bigger swings
+    # scale the correction slightly for bigger swings
     if absChange > minChange*4:
         adj = 3
     elif absChange > minChange*2:
@@ -237,29 +257,57 @@ def controlZone(z,t):
     elif absChange > minChange:
         adj = 1
     else:
-        tempChange = 0
         adj = 0
 
-    # the change may be 0 but we are way over/under temp,
-    # bump the pwm by one every tick
-    if (t.max - z.target) > 10:
+    #
+    # we have a correction based on change since the last correction,
+    # but we don't necessarily need to apply it
+    #
+    # if the hottest drive is not at the setpoint, and
+    # temp is not moving in the right direction, correct
+    #
+    # if the temp as at the setPoint, correct by 1 pwm
+    #
+    if (t.max - z.target) > 0 and z.falling <= 0:
        tempChange=1
-       adj=1
-    elif (t.max - z.target) < -10:
+       if adj == 0:
+           adj = 1
+       print('zone%d overtemp, correct %d' % (z.zone, adj))
+    elif (t.max - z.target) < 0 and z.rising <= 0:
        tempChange=-1
-       adj=1
+       if adj == 0:
+           adj = 1
+       print('zone%d undertemp, correct %d' % (z.zone, adj))
+    else:
+        # we are on the setpoint, do small adjustment if the average moves
+        if z.rising > 0:
+            tempChange=1
+            adj=1
+            z.rising=0
+            print('zone%d stabilizing, correct %d' % (z.zone, adj*tempChange))
+        elif z.falling > 0:
+            tempChange=-1
+            adj=1
+            z.falling=0
+            print('zone%d stabilizing, correct %d' % (z.zone, adj*tempChange))
+        else:
+            tempChange=0
+            adj=0
+            print('zone%d stable' % z.zone)
 
+    # final check
     if tempChange > 0 and t.max >= z.target:
-        z.lastTemp = t.avg
         newPwm += adj
     elif tempChange < 0 and t.max <= z.target:
-        z.lastTemp = t.avg
         newPwm -= adj
+    elif tempChange != 0:
+       print('zone%d veto pwm change' % z.zone)
 
     # clamp pwm to limits of the controller
     newPwm = max(z.minPwm, min(newPwm, z.maxPwm))
-    
+
     if newPwm != z.pwm:
+        z.lastTemp = t.avg
         result = setPwm(z.zone, newPwm)
         if result.returncode == 0:
             print('zone%d: pwm %d => %d' % (z.zone, z.pwm, newPwm))
@@ -267,17 +315,67 @@ def controlZone(z,t):
         else:
             print('zone%d: change rpm failed!' % z.zone)
 
-arecaIds = readArecaDiskList()
+    print('----------')
+
+#
+# notable publications on drive temperature
+#
+
+#
+# google - 2007 - "Failure Trends in a Large Disk Drive Population"
+# http://static.googleusercontent.com/media/research.google.com/en//archive/disk_failures.pdf
+# tldr: 30-45C is a good range, < 30 sees significant rise in AFR, > 45C minor increase in AFR
+#
+
+#
+# microsoft/UVa - 2013 - impact of temperature and disk failures
+# http://www.cs.virginia.edu/~gurumurthi/papers/acmtos13.pdf
+# tldr: AFR increases with temperature, above 5% at only 28C
+#
+
+#
+# backblaze - 2014 - correlation of temperature and failure
+# https://www.backblaze.com/blog/hard-drive-temperature-does-it-matter/
+# tldr: no correlation or weak for some models
+#
+
+
+# target temperature of hottest drive
+setPoint = 30
+
+# dual-zone configuration
+# This motherboard has two controllable zones,
+# (CPU and peripheral/PCI). The cpu cooler has been
+# set to a fixed rpm using a splitter, making both
+# zones available.
+
+# zone 1 for drives connected to areca controller
+# motherboard headers FAN[1-4], for two fans set
+# to the same rpm. temps polled via areca utility
+# and wrapper areca-hwinfo. fans do not turn below
+# 34% pwm
+arecaZone = Zone(0, 60)
+
+# zone 2 for drives connected to motherboard
+# motherboard header FANA for a single fan
+# temps polled via hddtemp utility running in daemon mode
+onboardZone = Zone(1, 55)
 print('areca ids='+','.join(list(map(str,arecaIds))))
 
 # set initial pwm
 setPwm(arecaZone.zone, arecaZone.pwm)
 setPwm(onboardZone.zone, onboardZone.pwm)
 
+# areca polling requires the id of each disk to poll
+# hddtemp polling returns all connected drives
+arecaIds = readArecaDiskList()
+
 while True:
     #controlZone(arecaZone, readArecaTemps())
     controlZone(arecaZone, readArecaSmartTemps(arecaIds))
-    controlZone(onboardZone, readSmartTemps())
-    time.sleep(30)
+    controlZone(onboardZone, readHddTemps())
+    # poll time should be long, smart seems to update every 60s
+    # and areca polling is slow
+    time.sleep(120)
 
 exit(0)
